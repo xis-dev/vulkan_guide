@@ -9,6 +9,8 @@
 #include <ranges>
 
 
+struct MeshAsset;
+
 struct DeletionQueue {
 	std::deque<std::function<void()>> deletors;
 
@@ -35,6 +37,7 @@ struct FrameData {
 	VkFence _renderFence;
 
 	DeletionQueue _deletionQueue;
+	DescriptorAllocatorGrowable _frameDescriptors;
 };
 
 constexpr unsigned FRAME_OVERLAP = 2;
@@ -55,6 +58,15 @@ struct ComputeEffect {
 	ComputePushConstants data;
 };
 
+struct GPUSceneData {
+	glm::mat4 view;
+	glm::mat4 proj;
+	glm::mat4 viewproj;
+
+	glm::vec4 ambientColor;
+	glm::vec4 sunlightDirection;
+	glm::vec4 sunlightColor;
+};
 class VulkanEngine {
 public:
 
@@ -82,11 +94,14 @@ public:
 	std::vector<VkImageView> _swapchainImageViews;
 	std::vector<VkSemaphore> _swapchainSemaphores;
 	VkExtent2D _swapchainExtent;
+	bool resize_requested{};
 
 	VmaAllocator _allocator; // Image allocator
 	// Draw resources
 	AllocatedImage _drawImage;
+	AllocatedImage _depthImage;
 	VkExtent2D _drawExtent;
+	float renderScale = 1.0f;
 
 	DescriptorAllocator globalDescriptorAllocator;
 
@@ -96,10 +111,34 @@ public:
 	VkPipeline _gradientPipeline;
 	VkPipelineLayout _gradientPipelineLayout;
 
+	VkPipeline _trianglePipeline;
+	VkPipelineLayout _trianglePipelineLayout;
+
+	VkPipeline _meshPipeline;
+	VkPipelineLayout _meshPipelineLayout;
+
+	GPUMeshBuffers rectangle;
+
 	// immediate submit structures
 	VkFence _immFence;
 	VkCommandBuffer _immCommandBuffer;
 	VkCommandPool _immCommandPool;
+
+    std::vector<std::shared_ptr<MeshAsset>> testMeshes;
+
+	GPUSceneData sceneData;
+	VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
+
+	// Test images
+	AllocatedImage _whiteImage;
+	AllocatedImage _blackImage;
+	AllocatedImage _greyImage;
+	AllocatedImage _errorCheckerboardImage;
+
+	VkSampler _defaultSamplerLinear;
+	VkSampler _defaultSamplerNearest;
+
+	VkDescriptorSetLayout _singleImageDescriptorLayout;
 
 	static VulkanEngine& Get();
 
@@ -116,6 +155,8 @@ public:
 	void run();
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
+
+	GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
 private:
 
 	bool bUseValidationLayers {true};
@@ -131,14 +172,28 @@ private:
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();
+	void resize_swapchain();
 
 	void draw_background(VkCommandBuffer cmd);
+	void draw_geometry(VkCommandBuffer cmd);
 
 	void init_descriptors();
 
 	void init_pipelines();
 	void init_background_pipelines();
+	void init_triangle_pipeline();
+	void init_mesh_pipeline();
+
+	void init_default_data();
 
 	void init_imgui();
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
+
+	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+	void destroy_buffer(const AllocatedBuffer& buffer);
+
+	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	void destroy_image(const AllocatedImage& img);
+
 };
