@@ -70,7 +70,7 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
 
             }
 
-            // Load vertex positiions
+            // Load vertex positions
             {
                 fastgltf::Accessor& posAccessor = gltf.accessors[p.findAttribute("POSITION")->second];
                 vertices.resize(vertices.size() + posAccessor.count);
@@ -99,8 +99,9 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
             auto uv = p.findAttribute("TEXCOORD_0");
             if (uv != p.attributes.end())
             {
-                fastgltf::iterateAccessorWithIndex<glm::vec4>(gltf, gltf.accessors[(*uv).second], [&](glm::vec4 v, size_t index) {
-                    vertices[initial_vtx + index].color = v;
+                fastgltf::iterateAccessorWithIndex<glm::vec2>(gltf, gltf.accessors[(*uv).second], [&](glm::vec2 v, size_t index) {
+                    vertices[initial_vtx + index].uv_x = v.x;
+                    vertices[initial_vtx + index].uv_y = v.y;
                 });
             }
 
@@ -117,7 +118,7 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
             newMesh.surfaces.push_back(newSurface);
         }
         // Display vertex normals
-        constexpr bool OverrideColors = true;
+        constexpr bool OverrideColors = false;
         if (OverrideColors)
         {
             for (Vertex& vtx: vertices)

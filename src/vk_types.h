@@ -21,6 +21,7 @@
 #include <glm/vec4.hpp>
 
 
+
 #define VK_CHECK(x)                                                     \
     do {                                                                \
         VkResult err = x;                                               \
@@ -63,5 +64,61 @@ struct GPUMeshBuffers {
 // Push constants for mesh object draws
 struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
+    glm::mat4 normalMatrix;
     VkDeviceAddress vertexBuffer;
+    
+};
+
+enum class MaterialPass :uint8_t {
+    MainColor,
+    Transparent,
+    Other
+};
+
+struct MaterialPipeline {
+    VkPipeline pipeline;
+    VkPipelineLayout layout;
+};
+
+struct MaterialInstance {
+    MaterialPipeline* pipeline;
+    VkDescriptorSet materialSet;
+    MaterialPass passType;
+};
+
+struct DrawContext;
+
+// Base class for renderable dynamic object
+class IRenderable {
+public:
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) = 0;
+};
+
+// Implementation of a drawable scene node
+// Scene node can hold children and keep a transform to propagate to them
+struct Node: public IRenderable {
+    // Parent pointer must be weak to avoid circular dependencies
+    std::weak_ptr<Node> parent;
+    std::vector<std::shared_ptr<Node>> children;
+
+    glm::mat4 localTransform;
+    glm::mat4 worldTransform;
+
+    void refreshTransform(const glm::mat4& parentMatrix)
+    {
+        worldTransform = parentMatrix * localTransform;
+        for (auto& c: children)
+        {
+            c->refreshTransform(worldTransform);
+        }
+    }
+
+    void Draw(const glm::mat4 &topMatrix, DrawContext &ctx) override
+    {
+        // Draw children
+        for (const auto& c : children)
+        {
+            c->Draw(topMatrix, ctx);
+        }
+    }
 };
