@@ -69,6 +69,18 @@ void VulkanEngine::init()
 
     init_default_data();
 
+    mainCamera.velocity = glm::vec3(0.f);
+    mainCamera.position = glm::vec3(0, 0, 5);
+
+    mainCamera.pitch = 0;
+    mainCamera.yaw = 0;
+
+    std::string structurePath = {"assets/structure.glb"};
+    auto structureFile = loadGltf(this, structurePath);
+
+    assert(structureFile.has_value());
+
+    loadedScenes["structure"] = *structureFile;
     // everything went fine
     _isInitialized = true;
 }
@@ -79,6 +91,8 @@ void VulkanEngine::cleanup()
 
         // Make sure the gpu has stopped doing its things
         vkDeviceWaitIdle(_device);
+
+        loadedScenes.clear();
 
         for (int i = 0; i < FRAME_OVERLAP; ++i) {
             vkDestroyCommandPool(_device, _frames[i]._commandPool, nullptr);
@@ -222,21 +236,30 @@ void VulkanEngine::draw()
 
 void VulkanEngine::update_scene()
 {
+    mainCamera.update();
+
+    glm::mat4 view = mainCamera.getViewMatrix();
+
+    // Camera projection
+    glm::mat4 projection = glm::perspective(glm::radians(70.0f), (float)_windowExtent.width / (float)_windowExtent.height, 1000.f, 0.1f);
+
     mainDrawContext.OpaqueSurfaces.clear();
+
+    loadedScenes["structure"]->Draw(glm::mat4{1.0f}, mainDrawContext);
 
     for (int x = -3; x < 3; x++) {
 
         glm::mat4 scale = glm::scale(glm::mat4{1.0f}, glm::vec3{0.2});
         glm::mat4 translation =  glm::translate(glm::mat4{1.0f}, glm::vec3{x, 1, 0});
 
-        loadedNodes["Cube"]->Draw(translation * scale, mainDrawContext);
+        //loadedNodes["Cube"]->Draw(translation * scale, mainDrawContext);
     }
 
-    loadedNodes["Suzanne"]->Draw(glm::mat4{1.0f}, mainDrawContext);
+    //loadedNodes["Suzanne"]->Draw(glm::mat4{1.0f}, mainDrawContext);
 
-	sceneData.view = glm::translate(glm::mat4{1.0f}, glm::vec3{ 0,0,-5 });
+	sceneData.view = view;
 	// camera projection
-	sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, 10000.f, 0.1f);
+	sceneData.proj = projection;
 
 	// invert the Y direction on projection matrix so that we are more similar
 	// to opengl and gltf axis
@@ -256,6 +279,8 @@ void VulkanEngine::run()
 
     // main loop
     while (!bQuit) {
+        //Begin clock
+        auto start = std::chrono::system_clock::now();
         // Handle events on queue
         while (SDL_PollEvent(&e) != 0) {
             // close the window when user alt-f4s or clicks the X button
@@ -271,6 +296,7 @@ void VulkanEngine::run()
                 }
             }
 
+            mainCamera.processSDLEvent(e);
             // Send SDL event to imgui for handling
             ImGui_ImplSDL2_ProcessEvent(&e);
         }
@@ -289,7 +315,16 @@ void VulkanEngine::run()
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        if (ImGui::Begin("background"))
+        ImGui::Begin("Stats");
+
+        ImGui::Text("frametime %f ms", stats.frameTime);
+        ImGui::Text("draw time %f ms", stats.mesh_draw_time);
+        ImGui::Text("update time %f ms", stats.scene_update_time);
+        ImGui::Text("triangles %i", stats.triangle_count);
+        ImGui::Text("draws %i", stats.drawcall_count);
+
+        ImGui::End();
+        /*if (ImGui::Begin("background"))
         {
             ImGui::SliderFloat("Render Scale", &renderScale, 0.3f, 1.5f);
             ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
@@ -303,14 +338,23 @@ void VulkanEngine::run()
             ImGui::InputFloat4("data3",(float*)& selected.data.data3);
             ImGui::InputFloat4("data4",(float*)& selected.data.data4);
         }
-        ImGui::End();
+        ImGui::End(); */
 
         // Make imgui calculate internal draw structures
         ImGui::Render();
 
         // Our renderer's draw
         draw();
+
+        // Get clock again to compare with start
+        auto end = std::chrono::system_clock::now();
+
+        // Convert to microseconds and then back to milliseconds
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        stats.frameTime = elapsed.count() /  1000.0f;
     }
+
+
 }
 
 void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)> &&function)
@@ -595,6 +639,37 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd) {
 
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 {
+    std::vector<uint32_t> opaque_draws;
+    opaque_draws.reserve(mainDrawContext.OpaqueSurfaces.size());
+
+    for (int i = 0; i < mainDrawContext.OpaqueSurfaces.size(); i++) {
+        if (is_visible(mainDrawContext.OpaqueSurfaces[i], sceneData.viewproj)) {
+		opaque_draws.push_back(i);
+	}
+}
+
+    // Sort the opaque surfaces by material and mesh
+    std::sort(opaque_draws.begin(), opaque_draws.end(), [&](const auto& iA, const auto& iB) {
+        const RenderObject& A = mainDrawContext.OpaqueSurfaces[iA];
+        const RenderObject& B = mainDrawContext.OpaqueSurfaces[iB];
+
+        if (A.material == B.material)
+        {
+            return A.indexBuffer < B.indexBuffer;
+        }
+        else
+        {
+            return A.material < B.material;
+        }
+    });
+
+    // Reset counters
+    stats.drawcall_count = 0;
+    stats.triangle_count = 0;
+
+    // Begin clock
+    auto start = std::chrono::system_clock::now();
+
     // Allocate new uniform buffer for scene data
     AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
@@ -622,52 +697,96 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     vkCmdBeginRendering(cmd, &renderInfo);
 
     //vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _trianglePipeline);
-    // Set dynamic viewport and scissor
-    VkViewport viewport{};
-    viewport.x = 0;
-    viewport.y = 0;
-    viewport.width = _drawExtent.width;
-    viewport.height = _drawExtent.height;
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
 
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    // State
+    MaterialPipeline* lastPipeline = nullptr;
+    MaterialInstance* lastMaterial = nullptr;
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
-    VkRect2D scissor{};
-    scissor.offset.x = 0;
-    scissor.offset.y = 0;
-    scissor.extent.width = _drawExtent.width;
-    scissor.extent.height = _drawExtent.height;
+    auto draw = [&](const RenderObject& draw) {
+        if (draw.material != lastMaterial)
+        {
+            lastMaterial = draw.material;
 
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
+            // Rebind pipeline and descriptors if material changed
+            if (draw.material->pipeline != lastPipeline)
+            {
+                lastPipeline = draw.material->pipeline;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->pipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
 
-    VkCullModeFlags cullMode = VK_CULL_MODE_NONE;
+                // Set dynamic viewport and scissor
+                VkViewport viewport{};
+                viewport.x = 0;
+                viewport.y = 0;
+                viewport.width = _drawExtent.width;
+                viewport.height = _drawExtent.height;
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
 
-    vkCmdSetCullMode(cmd, cullMode);
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-    vkCmdSetFrontFace(cmd, VK_FRONT_FACE_CLOCKWISE);
+                VkRect2D scissor{};
+                scissor.offset.x = 0;
+                scissor.offset.y = 0;
+                scissor.extent.width = _drawExtent.width;
+                scissor.extent.height = _drawExtent.height;
 
-    // Launch draw command for 3 vertices
-    //vkCmdDraw(cmd, 3, 1, 0, 0);
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces)
-    {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->layout, 1, 1, &draw.material->materialSet, 0, nullptr);
+                VkCullModeFlags cullMode = VK_CULL_MODE_NONE;
 
-        vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdSetCullMode(cmd, cullMode);
 
+                vkCmdSetFrontFace(cmd, VK_FRONT_FACE_CLOCKWISE);
+            }
+
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->layout, 1, 1, &draw.material->materialSet, 0, nullptr);
+        }
+
+        // Rebind index buffer if needed
+        if (draw.indexBuffer != lastIndexBuffer)
+        {
+            lastIndexBuffer = draw.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        // Calculate final mesh matrix
         GPUDrawPushConstants pushConstants;
         pushConstants.vertexBuffer = draw.vertexBufferAddress;
         pushConstants.worldMatrix = draw.transform;
         pushConstants.normalMatrix = (glm::transpose(glm::inverse(pushConstants.worldMatrix)));
+
         vkCmdPushConstants(cmd, draw.material->pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &pushConstants);
 
         vkCmdDrawIndexed(cmd, draw.indexCount, 1, draw.firstIndex, 0, 0);
+
+        // Counters for triangles and draws
+        stats.drawcall_count++;
+        stats.triangle_count += draw.indexCount / 3;
+    };
+
+    for (const auto& r : opaque_draws)
+    {
+        draw(mainDrawContext.OpaqueSurfaces[r]);
     }
 
+    for (const RenderObject& r : mainDrawContext.TransparentSurfaces)
+    {
+        draw(r);
+    }
+
+    // Delete draw commands after processing
+    mainDrawContext.OpaqueSurfaces.clear();
+    mainDrawContext.TransparentSurfaces.clear();
+
     vkCmdEndRendering(cmd);
+
+    auto end = std::chrono::system_clock::now();
+
+    // Convert to microseconds(int) then back to milliseconds
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    stats.mesh_draw_time = elapsed.count() / 1000.0f;
 }
 
 void VulkanEngine::init_descriptors() {
@@ -992,7 +1111,7 @@ void VulkanEngine::init_default_data()
     rectangle = uploadMesh(rect_indices,rect_vertices);
 
 
-    testMeshes =  loadGltfMeshes(this, "assets/basicmesh.glb").value();
+    testMeshes.clear();
 
     // 3 default textures, white, grey, black, 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1));
@@ -1240,17 +1359,17 @@ AllocatedImage VulkanEngine::create_image(VkExtent3D size, VkFormat format, VkIm
 AllocatedImage VulkanEngine::create_image(void *data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage,
     bool mipmapped)
 {
-    size_t data_size = size.depth * size.width * size.height * 4;
-    AllocatedBuffer uploadBuffer = create_buffer(data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+   size_t data_size = size.depth * size.width * size.height * 4;
+    AllocatedBuffer uploadbuffer = create_buffer(data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
-    memcpy(uploadBuffer.info.pMappedData, data, data_size);
+    memcpy(uploadbuffer.info.pMappedData, data, data_size);
 
-    AllocatedImage newImg = create_image(size, format, usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mipmapped);
+    AllocatedImage new_image = create_image(size, format, usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mipmapped);
 
     immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, newImg.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-        VkBufferImageCopy copyRegion{};
+        VkBufferImageCopy copyRegion = {};
         copyRegion.bufferOffset = 0;
         copyRegion.bufferRowLength = 0;
         copyRegion.bufferImageHeight = 0;
@@ -1261,14 +1380,19 @@ AllocatedImage VulkanEngine::create_image(void *data, VkExtent3D size, VkFormat 
         copyRegion.imageSubresource.layerCount = 1;
         copyRegion.imageExtent = size;
 
-        // Copy buffer into the image
-        vkCmdCopyBufferToImage(cmd, uploadBuffer.buffer, newImg.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-        vkutil::transition_image(cmd, newImg.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // copy the buffer into the image
+        vkCmdCopyBufferToImage(cmd, uploadbuffer.buffer, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+            &copyRegion);
+
+        if (mipmapped) {
+            vkutil::generate_mipmaps(cmd, new_image.image,VkExtent2D{new_image.imageExtent.width,new_image.imageExtent.height});
+        } else {
+            vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
     });
-
-    destroy_buffer(uploadBuffer);
-
-    return newImg;
+    destroy_buffer(uploadbuffer);
+    return new_image;
 }
 
 void VulkanEngine::destroy_image(const AllocatedImage &img)
@@ -1438,13 +1562,60 @@ void MeshNode::Draw(const glm::mat4 &topMatrix, DrawContext &ctx)
         def.firstIndex = s.startIndex;
         def.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
         def.material = &s.material->data;
-
+        def.bounds = s.bounds;
         def.transform = nodeMatrix;
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
 
-        ctx.OpaqueSurfaces.push_back(def);
+        if (s.material->data.passType == MaterialPass::Transparent)
+        {
+            ctx.TransparentSurfaces.push_back(def);
+        }
+        else
+        {
+            ctx.OpaqueSurfaces.push_back(def);
+        }
     }
 
     // Recurse down
     Node::Draw(topMatrix, ctx);
+}
+
+bool is_visible(const RenderObject &obj, const glm::mat4 &viewProj)
+{
+    std::array<glm::vec3, 8> corners {
+        glm::vec3 { 1, 1, 1 },
+        glm::vec3 { 1, 1, -1 },
+        glm::vec3 { 1, -1, 1 },
+        glm::vec3 { 1, -1, -1 },
+        glm::vec3 { -1, 1, 1 },
+        glm::vec3 { -1, 1, -1 },
+        glm::vec3 { -1, -1, 1 },
+        glm::vec3 { -1, -1, -1 },
+    };
+
+    glm::mat4 matrix = viewProj * obj.transform;
+
+    glm::vec3 min = { 1.5, 1.5, 1.5 };
+    glm::vec3 max = { -1.5, -1.5, -1.5 };
+
+    for (int c = 0; c < 8; ++c)
+    {
+        // Project each corner into clip space
+        glm::vec4 v = matrix * glm::vec4(obj.bounds.origin + (corners[c] * obj.bounds.extents), 1.0f);
+
+        // Perspective divide
+        v.x /= v.w;
+        v.y /= v.w;
+        v.z /= v.w;
+
+        min = glm::min(glm::vec3 {v.x, v.y, v.z}, min);
+        max = glm::max(glm::vec3 {v.x, v.y, v.z}, max);
+    }
+
+    // Check if the clip space box is within view
+    if (min.z > 1.f || max.z < 0.f || min.x > 1.f || max.x < -1.f || min.y > 1.f || max.y < -1.f) {
+        return false;
+    } else {
+        return true;
+   }
 }
